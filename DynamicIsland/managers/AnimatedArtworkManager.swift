@@ -39,6 +39,11 @@ actor AnimatedArtworkManager {
     private var tokenFailureCount: Int = 0
     private var tokenFailureLastAttempt: Date? = nil
     private static let maxBackoffSeconds: TimeInterval = 300 // 5 minutes cap
+    /// Builds signed only to run locally have no registered MusicKit client, so Apple's token
+    /// service answers "Client not found" every time. After a few failures in a row there is
+    /// nothing to gain from asking again until the app is relaunched, so stop for the session.
+    private static let sessionDisableThreshold = 3
+    private var tokenDisabledForSession = false
 
     private func tokenBackoffInterval() -> TimeInterval {
         guard tokenFailureCount > 0 else { return 0 }
@@ -59,6 +64,8 @@ actor AnimatedArtworkManager {
         if key == cachedKey {
             return cachedVideoURL
         }
+
+        if tokenDisabledForSession { return nil }
 
         // If MusicKit token has been consistently failing, honour the back-off
         // window before making another network request.
@@ -224,5 +231,9 @@ actor AnimatedArtworkManager {
         tokenFailureLastAttempt = Date()
         let backoff = tokenBackoffInterval()
         print("[AnimatedArtworkManager] Token failure #\(tokenFailureCount); backing off for \(Int(backoff))s")
+        if tokenFailureCount >= Self.sessionDisableThreshold {
+            tokenDisabledForSession = true
+            print("[AnimatedArtworkManager] MusicKit has no developer token for this build (is the app ID registered for MusicKit?). Animated artwork lookups are off until relaunch.")
+        }
     }
 }
