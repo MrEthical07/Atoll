@@ -412,6 +412,14 @@ extension NSImage {
     }
     
     func getBrightness() -> CGFloat {
+        // Called from view bodies, so remember the last answer instead of re-rendering.
+        if let cached = BrightnessCache.last, cached.image === self { return cached.value }
+        let value = computeBrightness()
+        BrightnessCache.last = (self, value)
+        return value
+    }
+
+    private func computeBrightness() -> CGFloat {
         guard let cgImage = self.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             return 0
         }
@@ -426,7 +434,7 @@ extension NSImage {
             return 0
         }
         
-        let context = CIContext(options: nil)
+        let context = SharedCIContext.shared
         
         var bitmap = [UInt8](repeating: 0, count: 4)
         context.render(outputImage,
@@ -462,12 +470,29 @@ extension NSImage {
         }
 
         let extent = inputImage.extent
-        let context = CIContext(options: nil)
+        let context = SharedCIContext.shared
         guard let finalImage = context.createCGImage(outputImage, from: extent) else {
             return self
         }
 
         return NSImage(cgImage: finalImage, size: size)
+    }
+}
+
+/// One Core Image context for the whole app. Each `CIContext` keeps its own GPU
+/// caches and intermediate buffers, so creating one per call adds up quickly.
+enum SharedCIContext {
+    static let shared = CIContext(options: nil)
+}
+
+/// Holds the most recent brightness result; keeping the image alive keeps its identity valid.
+private enum BrightnessCache {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var entry: (image: NSImage, value: CGFloat)?
+
+    static var last: (image: NSImage, value: CGFloat)? {
+        get { lock.withLock { entry } }
+        set { lock.withLock { entry = newValue } }
     }
 }
 

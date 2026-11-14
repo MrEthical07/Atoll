@@ -86,6 +86,8 @@ enum ArtworkUpscaler {
             return nil
         }
 
+        guard !Task.isCancelled else { return nil }
+
         let pixelFormat = configuration.supportedPixelFormats.contains(kCVPixelFormatType_32BGRA)
             ? kCVPixelFormatType_32BGRA
             : (configuration.supportedPixelFormats.first ?? kCVPixelFormatType_32BGRA)
@@ -100,7 +102,7 @@ enum ArtworkUpscaler {
               )
         else { return nil }
 
-        let context = CIContext()
+        let context = SharedCIContext.shared
         context.render(CIImage(cgImage: cgImage), to: sourceBuffer)
 
         guard let sourceFrame = VTFrameProcessorFrame(buffer: sourceBuffer, presentationTimeStamp: .zero),

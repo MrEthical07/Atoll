@@ -732,6 +732,7 @@ struct LockScreenMusicPanel: View {
     private var progressBar: some View {
         TimelineView(
             .animation(
+                minimumInterval: 1.0 / 30.0,
                 paused: isProgressTimelinePaused
             )
         ) { timeline in
@@ -1126,7 +1127,7 @@ struct LockScreenMusicPanel: View {
 
         // Redraws each frame while playing so the highlight tracks the music
         // rather than stepping a whole line at a time.
-        return TimelineView(.animation(paused: !musicManager.isPlaying)) { timeline in
+        return TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !musicManager.isPlaying)) { timeline in
             let progress = musicManager.currentLyricSweepProgress(at: timeline.date)
 
             HStack(spacing: 8) {

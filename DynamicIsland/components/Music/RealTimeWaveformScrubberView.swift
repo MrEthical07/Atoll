@@ -41,7 +41,7 @@ struct RealTimeWaveformScrubberView: View {
     
     private func startTimer() {
         timer?.invalidate()
-        let newTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
+        let newTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { _ in
             let tapMagnitudes = AudioTap.shared.getSmoothedMagnitudes()
             let barCount = Defaults[.visualizerBarCount]
             var newMags: [Float] = []
@@ -61,7 +61,7 @@ struct RealTimeWaveformScrubberView: View {
             }
             
             // Smoothly animate the path update
-            withAnimation(.linear(duration: 1.0 / 60.0)) {
+            withAnimation(.linear(duration: 1.0 / 30.0)) {
                 magnitudes = smoothedMags
             }
         }

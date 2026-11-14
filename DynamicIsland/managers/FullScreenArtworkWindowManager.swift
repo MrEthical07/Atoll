@@ -302,6 +302,9 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             .appendingPathComponent("atoll_aerial_thumbnail_backup.png")
     }()
     private var artworkFileURL: URL?
+    private var tempCleanupTask: Task<Void, Never>?
+    private static let tempFilePrefix = "atoll_artwork_wallpaper"
+    private static let tempFileLifetime: TimeInterval = 300
     private var cachedArtworkPNG: URL?
     private var cachedArtworkFingerprint: String?
     private var cachedBlurredArtworkPNG: URL?
@@ -351,6 +354,8 @@ final class FullScreenArtworkWindowManager: ObservableObject {
     private let spotifyCanvasFallbackHorizontalMargin: CGFloat = 48
 
     private init() {
+        // Leftovers from a previous run (crash, force quit) are never in use.
+        pruneArtworkTempFiles(olderThan: 0)
         observeArtworkChanges()
         observeVideoArtworkChanges()
         observePanelFrameChanges()
@@ -366,7 +371,12 @@ final class FullScreenArtworkWindowManager: ObservableObject {
     func autoApplyIfEligible() {
         guard !isShowing, presentationTask == nil else { return }
         let music = MusicManager.shared
-        guard music.hasActiveSession, isAutoWallpaperEnabled(forBundleIdentifier: music.bundleIdentifier) else { return }
+        guard music.hasActiveSession else { return }
+        guard isAutoWallpaperEnabled(forBundleIdentifier: music.bundleIdentifier) else {
+            // No automatic wallpaper, but a right-click may come: have the sharp cover ready.
+            if Defaults[.lockScreenMusicFullscreenArtworkEnabled] { warmUpHighResArtwork() }
+            return
+        }
         show(artwork: music.albumArt, videoURL: nil, allowLiveWallpaper: false, requireSharpCover: true)
     }
 
@@ -459,6 +469,8 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         onDismiss = nil
         callback?()
 
+        scheduleArtworkTempCleanup()
+
         print("[FullScreenArtworkWindowManager] Original wallpaper restored")
     }
 
@@ -469,6 +481,9 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             .debounce(for: .milliseconds(180), scheduler: DispatchQueue.main)
             .sink { [weak self] newArt in
                 guard let self else { return }
+                // Encoding and downloading artwork for every track is wasted work while the
+                // lock screen isn't up; the wallpaper path builds what it needs on demand.
+                guard self.isShowing || LockScreenManager.shared.isLocked else { return }
                 guard let fingerprint = self.imageFingerprint(for: newArt) else { return }
                 guard fingerprint != self.cachedArtworkFingerprint else { return }
                 self.warmUpHighResArtwork()
@@ -479,6 +494,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
                     await MainActor.run {
                         self.cachedArtworkPNG = url
                         self.cachedArtworkFingerprint = fingerprint
+                        self.scheduleArtworkTempCleanup()
                         if self.isShowing {
                             self.refreshPresentationForCurrentTrack()
                         }
@@ -935,6 +951,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             try encoded.write(to: tempURL, options: .atomic)
             cachedArtworkPNG = tempURL
             cachedArtworkFingerprint = fingerprint
+            scheduleArtworkTempCleanup()
             return tempURL
         } catch {
             return nil
@@ -962,6 +979,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             cachedBlurredArtworkPNG = tempURL
             cachedBlurredArtworkFingerprint = fingerprint
             cachedBlurredArtworkPixelSize = pixelSize
+            scheduleArtworkTempCleanup()
             return tempURL
         } catch {
             return nil
@@ -987,6 +1005,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             try encoded.write(to: fileURL, options: .atomic)
             cachedFilledArtworkPNG = fileURL
             cachedFilledArtworkKey = cacheKey
+            scheduleArtworkTempCleanup()
             return fileURL
         } catch {
             return nil
@@ -1030,7 +1049,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             ))
             .cropped(to: targetRect)
 
-        let context = CIContext(options: nil)
+        let context = SharedCIContext.shared
         guard let cgImage = context.createCGImage(centeredImage, from: targetRect) else { return nil }
 
         return NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:])
@@ -1081,13 +1100,70 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         return bitmap.representation(using: .png, properties: [:])
     }
 
+    /// Cheap identity for an image: its dimensions plus ~4k bytes sampled evenly across the
+    /// pixel data. Avoids re-encoding the whole image to PNG just to tell two covers apart.
     private nonisolated func imageFingerprint(for image: NSImage) -> String? {
-        guard let pngData = encodeToPNG(image) else { return nil }
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let data = cgImage.dataProvider?.data as Data?
+        else { return nil }
         var hasher = Hasher()
-        hasher.combine(pngData)
-        hasher.combine(Int(image.size.width.rounded()))
-        hasher.combine(Int(image.size.height.rounded()))
+        hasher.combine(cgImage.width)
+        hasher.combine(cgImage.height)
+        hasher.combine(data.count)
+        let samples = 4096
+        let stride = max(1, data.count / samples)
+        data.withUnsafeBytes { bytes in
+            var index = 0
+            while index < bytes.count {
+                hasher.combine(bytes[index])
+                index += stride
+            }
+        }
         return String(hasher.finalize())
+    }
+
+    /// Wallpaper PNGs are only needed while a wallpaper is applied. Remove them a few minutes
+    /// after they were written so they don't pile up in the temp folder.
+    private func scheduleArtworkTempCleanup() {
+        guard tempCleanupTask == nil else { return }
+        tempCleanupTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.tempFileLifetime))
+            guard !Task.isCancelled, let self else { return }
+            self.tempCleanupTask = nil
+            self.pruneArtworkTempFiles(olderThan: Self.tempFileLifetime)
+        }
+    }
+
+    private func pruneArtworkTempFiles(olderThan age: TimeInterval) {
+        // Files behind the wallpaper that is currently applied must stay.
+        var inUse = Set<String>()
+        if isShowing {
+            for url in [artworkFileURL, cachedArtworkPNG, cachedBlurredArtworkPNG, cachedFilledArtworkPNG] {
+                if let name = url?.lastPathComponent { inUse.insert(name) }
+            }
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return }
+
+        let cutoff = Date().addingTimeInterval(-age)
+        var removed = 0
+        for url in urls where url.lastPathComponent.hasPrefix(Self.tempFilePrefix) {
+            guard !inUse.contains(url.lastPathComponent) else { continue }
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let modified, modified > cutoff { continue }
+            if (try? FileManager.default.removeItem(at: url)) != nil { removed += 1 }
+        }
+        if removed > 0 {
+            print("[FullScreenArtworkWindowManager] removed \(removed) old artwork file(s)")
+        }
+        // Whatever is left (in use, or too new) gets another look later.
+        if removed < urls.filter({ $0.lastPathComponent.hasPrefix(Self.tempFilePrefix) }).count {
+            scheduleArtworkTempCleanup()
+        }
     }
 
     private func encodeBlurredWallpaperPNG(from artwork: NSImage, targetPixelSize: CGSize) -> Data? {
@@ -1126,7 +1202,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
                 ]
             )
 
-        let context = CIContext(options: nil)
+        let context = SharedCIContext.shared
         guard let cgImage = context.createCGImage(blurredImage, from: targetRect) else { return nil }
 
         let renderedImage = NSImage(cgImage: cgImage, size: NSSize(width: targetPixelSize.width, height: targetPixelSize.height))

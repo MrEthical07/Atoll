@@ -28,7 +28,13 @@ import UniformTypeIdentifiers
 actor ThumbnailService {
     static let shared = ThumbnailService()
 
-    private var cache: [String: NSImage] = [:]
+    /// Bounded so browsing a large shelf can't grow memory without limit.
+    private let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 100
+        cache.totalCostLimit = 64 * 1024 * 1024
+        return cache
+    }()
     private var pendingRequests: [String: Task<NSImage?, Never>] = [:]
     private let thumbnailGenerator = QLThumbnailGenerator.shared
 
@@ -37,7 +43,7 @@ actor ThumbnailService {
     func thumbnail(for url: URL, size: CGSize) async -> NSImage? {
         let cacheKey = "\(url.path)_\(size.width)x\(size.height)"
         
-        if let cached = cache[cacheKey] {
+        if let cached = cache.object(forKey: cacheKey as NSString) {
             return cached
         }
         
@@ -48,7 +54,8 @@ actor ThumbnailService {
         let task = Task<NSImage?, Never> {
             let thumbnail = await generateQuickLookThumbnail(for: url, size: size)
             if let thumbnail = thumbnail {
-                cache[cacheKey] = thumbnail
+                let cost = Int(thumbnail.size.width * thumbnail.size.height * 4)
+                cache.setObject(thumbnail, forKey: cacheKey as NSString, cost: cost)
             }
             pendingRequests[cacheKey] = nil
             return thumbnail
@@ -59,11 +66,12 @@ actor ThumbnailService {
     }
     
     func clearCache() {
-        cache.removeAll()
+        cache.removeAllObjects()
     }
     
     func clearCache(for url: URL) {
-        cache = cache.filter { !$0.key.starts(with: url.path) }
+        // NSCache can't be enumerated, so drop everything; thumbnails regenerate on demand.
+        cache.removeAllObjects()
     }
     
     // MARK: - Private Methods
