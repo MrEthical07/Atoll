@@ -11348,6 +11348,15 @@
         }
       }
     },
+    "Auto-set cover as wallpaper: Apple Music" : {
+
+    },
+    "Auto-set cover as wallpaper: Spotify" : {
+
+    },
+    "Auto-set cover as wallpaper: YouTube Music" : {
+
+    },
     "Automatic" : {
       "localizations" : {
         "ko" : {
@@ -65890,6 +65899,9 @@
           }
         }
       }
+    },
+    "Sets the album cover as the wallpaper as soon as the Mac locks, without right-clicking. It only happens when a sharp cover is found for the track; otherwise nothing changes. The original wallpaper comes back when you unlock. Needs fullscreen artwork to be enabled." : {
+
     },
     "Settings" : {
       "localizations" : {

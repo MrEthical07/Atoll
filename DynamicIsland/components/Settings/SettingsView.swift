@@ -6024,6 +6024,28 @@ struct LockScreenSettings: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
+                    VStack(alignment: .leading, spacing: 4) {
+                        Defaults.Toggle(key: .lockScreenAutoWallpaperAppleMusic) {
+                            Text("Auto-set cover as wallpaper: Apple Music")
+                        }
+                        .disabled(!enableLockScreenMediaWidget || !lockScreenMusicFullscreenArtworkEnabled)
+                        .settingsHighlight(id: highlightID("Auto-set cover as wallpaper: Apple Music"))
+                        Defaults.Toggle(key: .lockScreenAutoWallpaperSpotify) {
+                            Text("Auto-set cover as wallpaper: Spotify")
+                        }
+                        .disabled(!enableLockScreenMediaWidget || !lockScreenMusicFullscreenArtworkEnabled)
+                        .settingsHighlight(id: highlightID("Auto-set cover as wallpaper: Spotify"))
+                        Defaults.Toggle(key: .lockScreenAutoWallpaperYouTubeMusic) {
+                            Text("Auto-set cover as wallpaper: YouTube Music")
+                        }
+                        .disabled(!enableLockScreenMediaWidget || !lockScreenMusicFullscreenArtworkEnabled)
+                        .settingsHighlight(id: highlightID("Auto-set cover as wallpaper: YouTube Music"))
+                        Text("Sets the album cover as the wallpaper as soon as the Mac locks, without right-clicking. It only happens when a sharp cover is found for the track; otherwise nothing changes. The original wallpaper comes back when you unlock. Needs fullscreen artwork to be enabled.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     if !showStandardMediaControls {
                         Text("Enable Dynamic Island media controls to manage the lock screen panel.")
                             .font(.caption)

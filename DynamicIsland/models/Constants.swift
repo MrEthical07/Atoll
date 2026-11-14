@@ -1146,6 +1146,11 @@ extension Defaults.Keys {
     static let lockScreenMusicMergedAirPlayOutput = Key<Bool>("lockScreenMusicMergedAirPlayOutput", default: true)
     static let lockScreenMusicFullscreenArtworkEnabled = Key<Bool>("lockScreenMusicFullscreenArtworkEnabled", default: true)
     static let lockScreenKeepAlbumArtVisibleDuringFullscreenArtwork = Key<Bool>("lockScreenKeepAlbumArtVisibleDuringFullscreenArtwork", default: false)
+    /// Set the cover as the lock screen wallpaper automatically, per source. Only applied when a
+    /// sharp cover is available, so the wallpaper never ends up soft.
+    static let lockScreenAutoWallpaperAppleMusic = Key<Bool>("lockScreenAutoWallpaperAppleMusic", default: false)
+    static let lockScreenAutoWallpaperSpotify = Key<Bool>("lockScreenAutoWallpaperSpotify", default: false)
+    static let lockScreenAutoWallpaperYouTubeMusic = Key<Bool>("lockScreenAutoWallpaperYouTubeMusic", default: false)
     static let lockScreenMusicFullscreenVideoArtwork = Key<Bool>("lockScreenMusicFullscreenVideoArtwork", default: true)
     static let lockScreenUseArtworkLayoutOverFullscreenCanvas = Key<Bool>("lockScreenShowCenteredAlbumArtOverFullscreenCanvas", default: true)
     static let lockScreenTimerWidgetUsesBlur = Key<Bool>("lockScreenTimerWidgetUsesBlur", default: false)

@@ -351,6 +351,12 @@ struct LockScreenMusicPanel: View {
                 isArtworkFullscreen = false
             }
         }
+        .onChange(of: fullscreenArtworkManager.isShowing) { _, showing in
+            // Keeps the panel in step when the wallpaper is applied automatically.
+            if showing {
+                withAnimation(.easeInOut(duration: 0.28)) { isArtworkFullscreen = true }
+            }
+        }
         .onChange(of: isExpanded) { _, expanded in
             updatePanelSize()
         }

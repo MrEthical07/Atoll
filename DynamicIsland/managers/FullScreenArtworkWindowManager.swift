@@ -361,7 +361,30 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         observeAppTermination()
     }
 
-    func show(artwork: NSImage, videoURL: URL? = nil, allowLiveWallpaper: Bool = false) {
+    /// Applies the cover as the wallpaper without a click, for the sources the user enabled.
+    /// Skips quietly unless a sharp cover is found for the track.
+    func autoApplyIfEligible() {
+        guard !isShowing, presentationTask == nil else { return }
+        let music = MusicManager.shared
+        guard music.hasActiveSession, isAutoWallpaperEnabled(forBundleIdentifier: music.bundleIdentifier) else { return }
+        show(artwork: music.albumArt, videoURL: nil, allowLiveWallpaper: false, requireSharpCover: true)
+    }
+
+    private func isAutoWallpaperEnabled(forBundleIdentifier bundleIdentifier: String?) -> Bool {
+        switch bundleIdentifier {
+        case "com.apple.Music": return Defaults[.lockScreenAutoWallpaperAppleMusic]
+        case "com.spotify.client": return Defaults[.lockScreenAutoWallpaperSpotify]
+        case "com.github.th-ch.youtube-music": return Defaults[.lockScreenAutoWallpaperYouTubeMusic]
+        default: return false
+        }
+    }
+
+    func show(
+        artwork: NSImage,
+        videoURL: URL? = nil,
+        allowLiveWallpaper: Bool = false,
+        requireSharpCover: Bool = false
+    ) {
         guard !isShowing, presentationTask == nil else { return }
         guard let screen = NSScreen.main else { return }
 
@@ -370,9 +393,13 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         // the best image, instead of being set from the small one first.
         presentationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.prefetchHighResArtwork(on: screen, timeout: .milliseconds(600))
+            await self.prefetchHighResArtwork(on: screen, timeout: requireSharpCover ? .seconds(2) : .milliseconds(600))
             guard !Task.isCancelled else { return }
             self.presentationTask = nil
+            if requireSharpCover, self.highResArtwork?.trackKey != self.currentTrackKey {
+                print("[FullScreenArtworkWindowManager] auto wallpaper skipped: no sharp cover for this track")
+                return
+            }
             self.applyPresentation(
                 artwork: artwork,
                 videoURL: videoURL,
