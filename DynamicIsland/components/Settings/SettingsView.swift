@@ -3224,6 +3224,17 @@ struct Media: View {
                     )
                 }
                 .settingsHighlight(id: highlightID("Music Source"))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Defaults.Toggle(key: .autoSwitchToYouTubeMusicApp) {
+                        Text("Use YouTube Music controller when its app is running")
+                    }
+                    .settingsHighlight(id: highlightID("Use YouTube Music controller when its app is running"))
+                    Text("Off: your selected source (for example Now Playing) is always used. On: the YouTube Music desktop app is read through its API Server plugin, which adds favourite and a full-size cover for the wallpaper but shows nothing unless that plugin is enabled.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } header: {
                 Text("Media Source")
             } footer: {

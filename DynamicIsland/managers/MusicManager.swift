@@ -760,7 +760,7 @@ class MusicManager: ObservableObject {
                 $0.bundleIdentifier == Self.pearDesktopBundleID
             }
             
-            if pearDesktopRunning {
+            if pearDesktopRunning, Defaults[.autoSwitchToYouTubeMusicApp] {
                 print("[MusicManager] Pear Desktop detected at startup, auto-switching to YouTubeMusicController")
                 self.isPearDesktopAutoSwitched = true
                 if let controller = self.createController(for: .youtubeMusic) {
@@ -779,7 +779,8 @@ class MusicManager: ObservableObject {
             .sink { [weak self] notification in
                 guard let self = self,
                       let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                      app.bundleIdentifier == Self.pearDesktopBundleID else { return }
+                      app.bundleIdentifier == Self.pearDesktopBundleID,
+                      Defaults[.autoSwitchToYouTubeMusicApp] else { return }
 
                 print("[MusicManager] Pear Desktop launched, auto-switching to YouTubeMusicController")
                 self.isPearDesktopAutoSwitched = true

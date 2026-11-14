@@ -1070,6 +1070,10 @@ extension Defaults.Keys {
     static let waitInterval = Key<Double>("waitInterval", default: 3)
     static let showShuffleAndRepeat = Key<Bool>("showShuffleAndRepeat", default: true)
     static let showMediaOutputControl = Key<Bool>("showMediaOutputControl", default: true)
+    /// Switch to the YouTube Music controller whenever the desktop app is running, even when
+    /// another source is selected. Off by default so "Now Playing" really follows everything;
+    /// the YouTube controller also needs the app's API Server plugin, or it reports nothing.
+    static let autoSwitchToYouTubeMusicApp = Key<Bool>("autoSwitchToYouTubeMusicApp", default: false)
     /// Whether the source app's icon is drawn over the album art in the open notch.
     static let showMediaAppIconOverlay = Key<Bool>("showMediaAppIconOverlay", default: true)
     /// Whether the lock screen panel keeps a volume slider under the transport

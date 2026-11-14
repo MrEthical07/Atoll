@@ -53722,6 +53722,9 @@
         }
       }
     },
+    "Off: your selected source (for example Now Playing) is always used. On: the YouTube Music desktop app is read through its API Server plugin, which adds favourite and a full-size cover for the wallpaper but shows nothing unless that plugin is enabled." : {
+
+    },
     "OK" : {
       "localizations" : {
         "ar" : {
@@ -80802,6 +80805,9 @@
           }
         }
       }
+    },
+    "Use YouTube Music controller when its app is running" : {
+
     },
     "Used" : {
       "comment" : "A label describing the percentage of memory that is currently in use.",
