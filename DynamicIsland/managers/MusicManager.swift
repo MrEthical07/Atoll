@@ -742,6 +742,27 @@ class MusicManager: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Flipping the YouTube Music auto-switch takes effect right away. Without this, turning it
+        // off left the YouTube Music controller in charge until the app was relaunched, so a
+        // song started in Apple Music never reached the notch.
+        Defaults.publisher(.autoSwitchToYouTubeMusicApp, options: [])
+            .receive(on: RunLoop.main)
+            .sink { [weak self] change in
+                guard let self else { return }
+                if change.newValue {
+                    let youTubeMusicRunning = NSWorkspace.shared.runningApplications.contains {
+                        $0.bundleIdentifier == Self.pearDesktopBundleID
+                    }
+                    guard youTubeMusicRunning, let controller = self.createController(for: .youtubeMusic) else { return }
+                    self.isPearDesktopAutoSwitched = true
+                    self.setActiveController(controller)
+                } else if self.isPearDesktopAutoSwitched {
+                    self.isPearDesktopAutoSwitched = false
+                    self.setActiveControllerBasedOnPreference()
+                }
+            }
+            .store(in: &cancellables)
+
         // Observe Pear Desktop launch/terminate for auto-detection
         setupPearDesktopAutoDetection()
 
