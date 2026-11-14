@@ -64,6 +64,33 @@ actor HighResArtworkProvider {
         let key = "\(title)|\(artist)|\(album)|\(sourceArtworkURL?.absoluteString ?? "")|\(minimumPixelSide)"
         if key == lastKey { return lastImageData }
 
+        // The warm-up and the wallpaper request often ask for the same track at the same
+        // moment. Share one lookup instead of downloading the cover twice. The shared task
+        // is separate from either caller, so a caller's timeout doesn't cancel it.
+        if let pending = inFlight[key] { return await pending.value }
+        let task = Task {
+            await self.resolve(
+                title: title, artist: artist, album: album,
+                sourceArtworkURL: sourceArtworkURL, minimumPixelSide: minimumPixelSide
+            )
+        }
+        inFlight[key] = task
+        let result = await task.value
+        inFlight[key] = nil
+        lastKey = key
+        lastImageData = result
+        return result
+    }
+
+    private var inFlight: [String: Task<Data?, Never>] = [:]
+
+    private func resolve(
+        title: String,
+        artist: String,
+        album: String,
+        sourceArtworkURL: URL?,
+        minimumPixelSide: Int
+    ) async -> Data? {
         let side = min(max(minimumPixelSide, 1000), Self.maximumPixelSide)
 
         var imageData: Data?
@@ -83,10 +110,6 @@ actor HighResArtworkProvider {
             imageData = await fetchFromCatalog(cleanedTitle: cleaned, side: side)
         }
 
-        if !Task.isCancelled {
-            lastKey = key
-            lastImageData = imageData
-        }
         return imageData
     }
 

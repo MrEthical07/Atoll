@@ -17,6 +17,7 @@
  */
 
 import Foundation
+import Security
 import MusicKit
 
 actor AnimatedArtworkManager {
@@ -57,7 +58,23 @@ actor AnimatedArtworkManager {
         return Date().timeIntervalSince(last) < tokenBackoffInterval()
     }
 
+    /// MusicKit only hands out a developer token to an app signed with a team (and registered
+    /// for MusicKit). A build signed to run locally has no team identifier, so every lookup
+    /// would fail; skip the feature there and leave the still artwork untouched.
+    private static let isSignedWithTeam: Bool = {
+        var code: SecCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return false }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else { return false }
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information
+        ) == errSecSuccess, let details = information as? [String: Any] else { return false }
+        return details[kSecCodeInfoTeamIdentifier as String] != nil
+    }()
+
     func fetchAnimatedArtworkURL(title: String, artist: String) async -> URL? {
+        guard Self.isSignedWithTeam else { return nil }
         let key = "\(title)|\(artist)"
 
         // Return the cached result for the same song immediately.
