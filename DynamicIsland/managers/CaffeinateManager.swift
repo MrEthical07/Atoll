@@ -152,7 +152,7 @@ final class CaffeinateManager: ObservableObject {
 
     // MARK: - Pure helpers
 
-    private static let assertionReason = "Atoll is keeping this Mac awake"
+    private static let assertionReason = "MyNotch is keeping this Mac awake"
 
     /// The moment a session started at `start` should end, or `nil` when the
     /// session never expires on its own.

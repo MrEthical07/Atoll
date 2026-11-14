@@ -36,6 +36,13 @@ struct DynamicNotchApp: App {
     private let updaterDelegate = AtollUpdaterDelegate()
 
     init() {
+        // Registered defaults only apply to keys the user hasn't set, so existing
+        // settings are untouched and a fresh install starts from the bundled values.
+        if let url = Bundle.main.url(forResource: "DefaultSettings", withExtension: "plist"),
+           let bundledDefaults = NSDictionary(contentsOf: url) as? [String: Any] {
+            UserDefaults.standard.register(defaults: bundledDefaults)
+        }
+
         // Skip Sparkle's launch-time update check during UI testing.
         // The AtollUpdaterDelegate overrides the feed URL at runtime
         // based on the user's selected update channel.
@@ -54,7 +61,7 @@ struct DynamicNotchApp: App {
             }
             CheckForUpdatesView(updater: updaterController.updater)
             Divider()
-            Button("Restart Atoll") {
+            Button("Restart MyNotch") {
                 guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
 
                 let workspace = NSWorkspace.shared

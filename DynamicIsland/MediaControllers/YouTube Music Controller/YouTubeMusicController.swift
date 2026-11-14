@@ -454,6 +454,8 @@ final class YouTubeMusicController: MediaControllerProtocol {
             }
         }
 
+        newState.sourceArtworkURL = response.imageSrc.flatMap { URL(string: $0) }
+
         // Always update - removed comparison since PlaybackState doesn't conform to Equatable
         playbackState = newState
 
@@ -467,6 +469,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
                     let data = try await ImageService.shared.fetchImageData(from: url)
                     await MainActor.run { [weak self] in
                         self?.playbackState.artwork = data
+                        self?.playbackState.sourceArtworkURL = url
                     }
                 } catch { /* ignore */ }
             }

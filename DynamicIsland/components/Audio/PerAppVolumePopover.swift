@@ -91,7 +91,7 @@ struct PerAppVolumePopover: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.yellow)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Atoll needs audio recording permission to change app volumes.")
+                Text("MyNotch needs audio recording permission to change app volumes.")
                     .font(.caption)
                 Button("Open Privacy Settings") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {

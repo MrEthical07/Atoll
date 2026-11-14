@@ -212,6 +212,7 @@ class SpotifyController: MediaControllerProtocol {
         if artworkURL == lastArtworkURL, let existingArtwork = self.playbackState.artwork {
             state.artwork = existingArtwork
         }
+        state.sourceArtworkURL = artworkURL.isEmpty ? nil : URL(string: artworkURL)
 
         let isSameCanvasTrack = trackURI == currentCanvasTrackURI
 
@@ -262,6 +263,7 @@ class SpotifyController: MediaControllerProtocol {
                         updatedState.artwork = data
                         updatedState.artist = self.playbackState.artist
                         updatedState.liveArtworkURL = self.playbackState.liveArtworkURL
+                        updatedState.sourceArtworkURL = url
                         self.playbackState = updatedState
                         self.lastArtworkURL = artworkURL
                         self.artworkFetchTask = nil

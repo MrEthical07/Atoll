@@ -1070,6 +1070,8 @@ extension Defaults.Keys {
     static let waitInterval = Key<Double>("waitInterval", default: 3)
     static let showShuffleAndRepeat = Key<Bool>("showShuffleAndRepeat", default: true)
     static let showMediaOutputControl = Key<Bool>("showMediaOutputControl", default: true)
+    /// Whether the source app's icon is drawn over the album art in the open notch.
+    static let showMediaAppIconOverlay = Key<Bool>("showMediaAppIconOverlay", default: true)
     /// Whether the lock screen panel keeps a volume slider under the transport
     /// row, rather than leaving volume behind the output button.
     ///

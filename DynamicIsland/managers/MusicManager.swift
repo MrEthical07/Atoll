@@ -632,6 +632,8 @@ class MusicManager: ObservableObject {
     @Published private(set) var isAdvertisement: Bool = false
     @ObservedObject var coordinator = DynamicIslandViewCoordinator.shared
     @Published var usingAppIconForArtwork: Bool = false
+    /// URL the source app's cover was downloaded from, if the source exposes one.
+    var sourceArtworkURL: URL?
     @Published private(set) var skipGesturePulse: SkipGesturePulse?
 
     // MARK: - Lyrics Properties
@@ -971,6 +973,7 @@ class MusicManager: ObservableObject {
             || bundleChanged
             || contentIdentifierChanged
             || contentURLChanged
+        self.sourceArtworkURL = state.sourceArtworkURL
         let liveArtworkChanged = state.liveArtworkURL != self.videoArtworkURL
 
         if liveArtworkChanged {

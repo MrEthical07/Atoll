@@ -601,13 +601,23 @@ struct LockScreenMusicPanel: View {
         .scaleEffect(musicManager.isPlaying ? 1 : 0.85)
         .animation(.easeInOut(duration: 0.2), value: musicManager.isPlaying)
         .animation(.easeInOut(duration: 0.28), value: isArtworkFullscreen)
-        .onTapGesture {
-            toggleExpanded()
-        }
-        .onRightClick {
-            expandArtworkToFullscreen()
+        // The click target sits outside the opacity/scale effects above, so it
+        // keeps its full size while paused (the artwork shrinks to 85% then),
+        // and it extends past the artwork's edge so near-misses still land.
+        .overlay {
+            Color.clear
+                .contentShape(Rectangle())
+                .padding(-albumArtHitSlop)
+                .onTapGesture {
+                    toggleExpanded()
+                }
+                .onRightClick {
+                    expandArtworkToFullscreen()
+                }
         }
     }
+
+    private var albumArtHitSlop: CGFloat { 14 }
 
     @ViewBuilder
     private func visualizer(height: CGFloat) -> some View {

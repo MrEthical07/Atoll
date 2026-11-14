@@ -324,6 +324,7 @@ struct AlbumArtView: View {
     @ObservedObject var musicManager = MusicManager.shared
     @ObservedObject var vm: DynamicIslandViewModel
     @Default(.showLiveCanvasInDynamicIsland) private var showLiveCanvasInDynamicIsland
+    @Default(.showMediaAppIconOverlay) private var showMediaAppIconOverlay
     let albumArtNamespace: Namespace.ID
 
     private var usesLiveCanvasArtwork: Bool {
@@ -426,7 +427,7 @@ struct AlbumArtView: View {
 
     @ViewBuilder
     private var appIconOverlay: some View {
-        if vm.notchState == .open && !musicManager.usingAppIconForArtwork {
+        if vm.notchState == .open && !musicManager.usingAppIconForArtwork && showMediaAppIconOverlay {
             AppIcon(for: musicManager.bundleIdentifier ?? "com.apple.Music")
                 .resizable()
                 .scaledToFill()
@@ -988,6 +989,13 @@ struct NotchHomeView: View {
             .combined(with: .move(edge: .top)))
         .blur(radius: vm.notchState == .closed ? 30 : 0)
         .padding(Defaults[.enableMinimalisticUI] ? 0 : 8) //Putting the main padding for home view here for consistency
+        .onChange(of: vm.notchState) { _, newState in
+            // The mirror is a one-shot peek: closing the notch ends it.
+            if newState != .open, vm.isCameraExpanded {
+                vm.isCameraExpanded = false
+                webcamManager.stopSession()
+            }
+        }
     }
 
     private var sideLyricsContent: some View {
@@ -1009,7 +1017,8 @@ struct NotchHomeView: View {
     }
 
     private var mirrorIsVisible: Bool {
-        Defaults[.showMirror] && webcamManager.cameraAvailable && vm.notchState == .open
+        // Only after the header's mirror button has been pressed, not whenever the notch is open.
+        Defaults[.showMirror] && webcamManager.cameraAvailable && vm.notchState == .open && vm.isCameraExpanded
     }
 
     private var cameraPreview: some View {

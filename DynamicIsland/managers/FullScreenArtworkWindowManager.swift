@@ -307,6 +307,13 @@ final class FullScreenArtworkWindowManager: ObservableObject {
     private var cachedBlurredArtworkPNG: URL?
     private var cachedBlurredArtworkFingerprint: String?
     private var cachedBlurredArtworkPixelSize: CGSize = .zero
+    private var cachedFilledArtworkPNG: URL?
+    private var cachedFilledArtworkKey: String?
+    private var highResArtwork: (trackKey: String, image: NSImage)?
+    /// Model-upscaled stand-in used only when no sharper cover could be found online.
+    private var upscaledArtwork: (trackKey: String, image: NSImage)?
+    private var highResArtworkTask: Task<Void, Never>?
+    private var presentationTask: Task<Void, Never>?
     private var activeSongTitle: String?
     private var activeArtist: String?
     private var trackChangeCancellable: AnyCancellable?
@@ -355,19 +362,39 @@ final class FullScreenArtworkWindowManager: ObservableObject {
     }
 
     func show(artwork: NSImage, videoURL: URL? = nil, allowLiveWallpaper: Bool = false) {
-        guard !isShowing else { return }
+        guard !isShowing, presentationTask == nil else { return }
         guard let screen = NSScreen.main else { return }
-        applyPresentation(
-            artwork: artwork,
-            videoURL: videoURL,
-            allowLiveWallpaper: allowLiveWallpaper,
-            on: screen,
-            backupWallpaperConfiguration: true
-        )
-        observeTrackChanges()
+
+        // The now-playing artwork is usually only a few hundred pixels wide. Give the
+        // sharp catalog cover a moment to arrive so the wallpaper is applied once with
+        // the best image, instead of being set from the small one first.
+        presentationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.prefetchHighResArtwork(on: screen, timeout: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            self.presentationTask = nil
+            self.applyPresentation(
+                artwork: artwork,
+                videoURL: videoURL,
+                allowLiveWallpaper: allowLiveWallpaper,
+                on: screen,
+                backupWallpaperConfiguration: true
+            )
+            self.observeTrackChanges()
+        }
     }
 
     func hide() {
+        let wasPreparing = presentationTask != nil
+        presentationTask?.cancel()
+        presentationTask = nil
+        if wasPreparing, !isShowing {
+            // Dismissed while still waiting for the cover; nothing was applied yet.
+            let callback = onDismiss
+            onDismiss = nil
+            callback?()
+            return
+        }
         guard isShowing else { return }
         resumeWallpaperAgentIfNeeded()
         isShowing = false
@@ -385,6 +412,8 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         liveWallpaperTask = nil
         deferredTrackRefreshTask?.cancel()
         deferredTrackRefreshTask = nil
+        highResArtworkTask?.cancel()
+        highResArtworkTask = nil
 
         hideVideoWindow()
         hideArtworkOverlay()
@@ -415,6 +444,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
                 guard let self else { return }
                 guard let fingerprint = self.imageFingerprint(for: newArt) else { return }
                 guard fingerprint != self.cachedArtworkFingerprint else { return }
+                self.warmUpHighResArtwork()
                 let url = self.artworkCacheFileURL(for: fingerprint)
                 Task.detached(priority: .utility) {
                     guard let pngData = self.encodeToPNG(newArt) else { return }
@@ -530,6 +560,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         on screen: NSScreen,
         backupWallpaperConfiguration: Bool
     ) {
+        let artwork = preferredArtwork(fallback: artwork)
         let artworkID = "\(MusicManager.shared.songTitle)|\(MusicManager.shared.artistName)"
         guard let artworkFingerprint = imageFingerprint(for: artwork) else { return }
         isLiveWallpaperAllowed = allowLiveWallpaper
@@ -542,9 +573,13 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         guard let rawArtworkFileURL = persistedArtworkFileURL(for: artwork, fingerprint: artworkFingerprint) else { return }
         let expectCanvas = effectiveVideoURL != nil
         let blurredFallbackURL = blurredWallpaperFileURL(for: artwork, fingerprint: artworkFingerprint, screen: screen) ?? rawArtworkFileURL
+        // Pre-render the wallpaper at the display's native pixel size with a
+        // high-quality filter instead of handing macOS a small square to stretch.
+        let filledArtworkURL = filledWallpaperFileURL(for: artwork, fingerprint: artworkFingerprint, screen: screen)
+            ?? rawArtworkFileURL
         let wallpaperURL = (shouldUseStaticFallbackWallpaper || expectCanvas)
             ? blurredFallbackURL
-            : rawArtworkFileURL
+            : filledArtworkURL
         let wallpaperKey = wallpaperIdentityKey(
             fingerprint: artworkFingerprint,
             usesFallback: shouldUseStaticFallbackWallpaper || expectCanvas,
@@ -615,7 +650,59 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             scheduleWallpaperTransitionHide(after: .milliseconds(900))
         }
 
+        requestHighResArtworkIfNeeded(on: screen)
+
         print("[FullScreenArtworkWindowManager] Artwork applied as wallpaper")
+    }
+
+    // MARK: - High-resolution artwork
+
+    private var currentTrackKey: String {
+        "\(MusicManager.shared.songTitle)|\(MusicManager.shared.artistName)|\(MusicManager.shared.album)"
+    }
+
+    /// Uses the high-resolution cover for the current track once it has arrived.
+    private func preferredArtwork(fallback: NSImage) -> NSImage {
+        if let highResArtwork, highResArtwork.trackKey == currentTrackKey { return highResArtwork.image }
+        if let upscaledArtwork, upscaledArtwork.trackKey == currentTrackKey { return upscaledArtwork.image }
+        return fallback
+    }
+
+    /// Fetches a sharper cover for the current track in the background and
+    /// re-applies the wallpaper when it arrives. Until then the existing artwork
+    /// is shown, so the wallpaper never waits on the network.
+    private func requestHighResArtworkIfNeeded(on screen: NSScreen) {
+        let trackKey = currentTrackKey
+        if highResArtwork?.trackKey == trackKey { return }
+
+        let title = MusicManager.shared.songTitle
+        let artist = MusicManager.shared.artistName
+        let album = MusicManager.shared.album
+        let sourceArtworkURL = MusicManager.shared.sourceArtworkURL
+        let targetPixelSize = wallpaperPixelSize(for: screen)
+        let minimumPixelSide = Int(max(targetPixelSize.width, targetPixelSize.height).rounded())
+
+        highResArtworkTask?.cancel()
+        highResArtworkTask = Task { @MainActor [weak self] in
+            guard let imageData = await HighResArtworkProvider.shared.artwork(
+                title: title,
+                artist: artist,
+                album: album,
+                sourceArtworkURL: sourceArtworkURL,
+                minimumPixelSide: minimumPixelSide
+            ), let image = NSImage(data: imageData) else { return }
+
+            guard let self, !Task.isCancelled, self.isShowing, self.currentTrackKey == trackKey else { return }
+            // Only swap if the catalog copy is actually sharper than what we have.
+            guard image.atollPixelSize.width > MusicManager.shared.albumArt.atollPixelSize.width else {
+                print("[FullScreenArtworkWindowManager] catalog cover not sharper than current art; keeping current")
+                return
+            }
+            print("[FullScreenArtworkWindowManager] swapping in \(Int(image.atollPixelSize.width))px cover")
+
+            self.highResArtwork = (trackKey, image)
+            self.refreshPresentationForCurrentTrack()
+        }
     }
 
     private func refreshPresentationForCurrentTrack() {
@@ -623,13 +710,99 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         guard MusicManager.shared.hasActiveSession else { return }
         guard let screen = NSScreen.main else { return }
 
-        applyPresentation(
-            artwork: MusicManager.shared.albumArt,
-            videoURL: isLiveWallpaperAllowed ? MusicManager.shared.videoArtworkURL : nil,
-            allowLiveWallpaper: isLiveWallpaperAllowed,
-            on: screen,
-            backupWallpaperConfiguration: false
-        )
+        presentationTask?.cancel()
+        presentationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Same as the first apply: wait briefly for the sharp cover of the new track.
+            await self.prefetchHighResArtwork(on: screen, timeout: .milliseconds(500))
+            guard !Task.isCancelled, self.isShowing else { return }
+            self.presentationTask = nil
+            self.applyPresentation(
+                artwork: MusicManager.shared.albumArt,
+                videoURL: self.isLiveWallpaperAllowed ? MusicManager.shared.videoArtworkURL : nil,
+                allowLiveWallpaper: self.isLiveWallpaperAllowed,
+                on: screen,
+                backupWallpaperConfiguration: false
+            )
+        }
+    }
+
+    /// No sharper cover exists online, so enlarge the one we have with the on-device model.
+    private func prepareUpscaledArtwork(trackKey: String, targetSide: Int) async {
+        guard #available(macOS 26.0, *) else { return }
+        if upscaledArtwork?.trackKey == trackKey { return }
+        let current = MusicManager.shared.albumArt
+        guard let upscaled = await ArtworkUpscaler.upscale(current, toward: targetSide, timeout: .milliseconds(900)),
+              !Task.isCancelled, currentTrackKey == trackKey
+        else { return }
+        upscaledArtwork = (trackKey, upscaled)
+    }
+
+    /// Starts the sharp-cover lookup as soon as a track's artwork arrives, so by the time
+    /// the wallpaper is requested the answer is already cached.
+    private func warmUpHighResArtwork() {
+        guard let screen = NSScreen.main else { return }
+        let title = MusicManager.shared.songTitle
+        let artist = MusicManager.shared.artistName
+        let album = MusicManager.shared.album
+        let sourceArtworkURL = MusicManager.shared.sourceArtworkURL
+        let pixelSize = wallpaperPixelSize(for: screen)
+        let minimumPixelSide = Int(max(pixelSize.width, pixelSize.height).rounded())
+        Task.detached(priority: .utility) {
+            _ = await HighResArtworkProvider.shared.artwork(
+                title: title,
+                artist: artist,
+                album: album,
+                sourceArtworkURL: sourceArtworkURL,
+                minimumPixelSide: minimumPixelSide
+            )
+        }
+    }
+
+    /// Looks up the sharp cover for the current track and stores it when it beats the
+    /// artwork we already have. Gives up after `timeout`; a late arrival is still picked
+    /// up by `requestHighResArtworkIfNeeded`.
+    private func prefetchHighResArtwork(on screen: NSScreen, timeout: Duration) async {
+        let trackKey = currentTrackKey
+        if highResArtwork?.trackKey == trackKey { return }
+
+        let title = MusicManager.shared.songTitle
+        let artist = MusicManager.shared.artistName
+        let album = MusicManager.shared.album
+        let sourceArtworkURL = MusicManager.shared.sourceArtworkURL
+        let targetPixelSize = wallpaperPixelSize(for: screen)
+        let minimumPixelSide = Int(max(targetPixelSize.width, targetPixelSize.height).rounded())
+
+        let imageData: Data? = await withTaskGroup(of: Data?.self) { group in
+            group.addTask {
+                await HighResArtworkProvider.shared.artwork(
+                    title: title,
+                    artist: artist,
+                    album: album,
+                    sourceArtworkURL: sourceArtworkURL,
+                    minimumPixelSide: minimumPixelSide
+                )
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+
+        guard !Task.isCancelled, currentTrackKey == trackKey,
+              let imageData, let image = NSImage(data: imageData),
+              image.atollPixelSize.width > MusicManager.shared.albumArt.atollPixelSize.width
+        else {
+            print("[FullScreenArtworkWindowManager] no sharper cover before applying wallpaper (current art is \(Int(MusicManager.shared.albumArt.atollPixelSize.width))px)")
+            await prepareUpscaledArtwork(trackKey: trackKey, targetSide: minimumPixelSide)
+            return
+        }
+
+        print("[FullScreenArtworkWindowManager] using \(Int(image.atollPixelSize.width))px cover for first apply")
+        highResArtwork = (trackKey, image)
     }
 
     private func observePanelFrameChanges() {
@@ -766,6 +939,74 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         } catch {
             return nil
         }
+    }
+
+    private func filledWallpaperFileURL(for artwork: NSImage, fingerprint: String, screen: NSScreen) -> URL? {
+        let pixelSize = wallpaperPixelSize(for: screen)
+        let cacheKey = "\(normalizedFingerprintComponent(fingerprint))_\(Int(pixelSize.width.rounded()))x\(Int(pixelSize.height.rounded()))"
+
+        if let cached = cachedFilledArtworkPNG,
+           cachedFilledArtworkKey == cacheKey,
+           FileManager.default.fileExists(atPath: cached.path) {
+            return cached
+        }
+
+        guard let encoded = encodeFilledWallpaperPNG(from: artwork, targetPixelSize: pixelSize) else { return nil }
+
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("atoll_artwork_wallpaper_filled_\(cacheKey).png")
+
+        do {
+            try encoded.write(to: fileURL, options: .atomic)
+            cachedFilledArtworkPNG = fileURL
+            cachedFilledArtworkKey = cacheKey
+            return fileURL
+        } catch {
+            return nil
+        }
+    }
+
+    /// Scales the artwork to cover the whole screen (aspect-fill, centered crop)
+    /// using Lanczos resampling, which keeps edges far cleaner than the default
+    /// filter macOS applies when it stretches a small wallpaper itself.
+    private nonisolated func encodeFilledWallpaperPNG(from artwork: NSImage, targetPixelSize: CGSize) -> Data? {
+        guard let tiffData = artwork.tiffRepresentation,
+              let sourceImage = CIImage(data: tiffData)
+        else { return nil }
+
+        let sourceExtent = sourceImage.extent
+        guard sourceExtent.width > 0, sourceExtent.height > 0 else { return nil }
+
+        let targetRect = CGRect(origin: .zero, size: targetPixelSize)
+        let scale = max(
+            targetRect.width / sourceExtent.width,
+            targetRect.height / sourceExtent.height
+        )
+
+        var scaledImage = sourceImage.applyingFilter(
+            "CILanczosScaleTransform",
+            parameters: [kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1.0]
+        )
+        // A big enlargement leaves edges soft; a light unsharp mask brings back some
+        // definition without the blocky look of nearest-neighbour scaling.
+        if scale > 1.5 {
+            scaledImage = scaledImage.applyingFilter(
+                "CIUnsharpMask",
+                parameters: [kCIInputRadiusKey: 2.0, kCIInputIntensityKey: 0.5]
+            )
+        }
+        let scaledExtent = scaledImage.extent
+        let centeredImage = scaledImage
+            .transformed(by: CGAffineTransform(
+                translationX: (targetRect.width - scaledExtent.width) / 2 - scaledExtent.minX,
+                y: (targetRect.height - scaledExtent.height) / 2 - scaledExtent.minY
+            ))
+            .cropped(to: targetRect)
+
+        let context = CIContext(options: nil)
+        guard let cgImage = context.createCGImage(centeredImage, from: targetRect) else { return nil }
+
+        return NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:])
     }
 
     private func wallpaperPixelSize(for screen: NSScreen) -> CGSize {
@@ -951,7 +1192,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             let prepared = await Self.prepareCustomLiveWallpaperAsset(
                 from: videoURL,
                 assetID: assetID,
-                displayName: displayName.isEmpty ? "Atoll Canvas" : displayName,
+                displayName: displayName.isEmpty ? "MyNotch Canvas" : displayName,
                 manifestURL: manifestURL,
                 videosDirectoryURL: videosDirectoryURL,
                 thumbnailsDirectoryURL: thumbnailsDirectoryURL,

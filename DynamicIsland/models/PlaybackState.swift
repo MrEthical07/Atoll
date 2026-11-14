@@ -45,6 +45,8 @@ struct PlaybackState {
     var lastUpdated: Date = Date.distantPast
     var artwork: Data?
     var liveArtworkURL: URL?
+    /// Where the source app's cover came from, when it exposes one. Used to ask for a larger version.
+    var sourceArtworkURL: URL?
 }
 
 extension PlaybackState: Equatable {
