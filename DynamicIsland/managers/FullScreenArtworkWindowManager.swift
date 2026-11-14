@@ -403,7 +403,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         // the best image, instead of being set from the small one first.
         presentationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.prefetchHighResArtwork(on: screen, timeout: requireSharpCover ? .seconds(2) : .milliseconds(600))
+            await self.prefetchHighResArtwork(on: screen, timeout: requireSharpCover ? .seconds(4) : .milliseconds(600), requireSharp: requireSharpCover)
             guard !Task.isCancelled else { return }
             self.presentationTask = nil
             if requireSharpCover, self.highResArtwork?.trackKey != self.currentTrackKey {
@@ -701,7 +701,9 @@ final class FullScreenArtworkWindowManager: ObservableObject {
     // MARK: - High-resolution artwork
 
     private var currentTrackKey: String {
-        "\(MusicManager.shared.songTitle)|\(MusicManager.shared.artistName)|\(MusicManager.shared.album)"
+        // Title and artist only: the album field is often filled in a moment after the track
+        // starts, which would make a lookup that began earlier look like it belongs to another song.
+        "\(MusicManager.shared.songTitle)|\(MusicManager.shared.artistName)"
     }
 
     /// Uses the high-resolution cover for the current track once it has arrived.
@@ -805,7 +807,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
     /// Looks up the sharp cover for the current track and stores it when it beats the
     /// artwork we already have. Gives up after `timeout`; a late arrival is still picked
     /// up by `requestHighResArtworkIfNeeded`.
-    private func prefetchHighResArtwork(on screen: NSScreen, timeout: Duration) async {
+    private func prefetchHighResArtwork(on screen: NSScreen, timeout: Duration, requireSharp: Bool = false) async {
         let trackKey = currentTrackKey
         if highResArtwork?.trackKey == trackKey { return }
 
@@ -835,12 +837,17 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             return first
         }
 
-        guard !Task.isCancelled, currentTrackKey == trackKey,
-              let imageData, let image = NSImage(data: imageData),
+        if Task.isCancelled { return }
+        if currentTrackKey != trackKey {
+            print("[FullScreenArtworkWindowManager] track changed during cover lookup; dropping result")
+            return
+        }
+        guard let imageData, let image = NSImage(data: imageData),
               image.atollPixelSize.width > MusicManager.shared.albumArt.atollPixelSize.width
         else {
-            print("[FullScreenArtworkWindowManager] no sharper cover before applying wallpaper (current art is \(Int(MusicManager.shared.albumArt.atollPixelSize.width))px)")
-            await prepareUpscaledArtwork(trackKey: trackKey, targetSide: minimumPixelSide)
+            print("[FullScreenArtworkWindowManager] no sharper cover before applying wallpaper (current art is \(Int(MusicManager.shared.albumArt.atollPixelSize.width))px, lookup \(imageData == nil ? "returned nothing or timed out" : "was not sharper"))")
+            // Automatic wallpaper only ever uses a real cover, so don't spend time upscaling.
+            if !requireSharp { await prepareUpscaledArtwork(trackKey: trackKey, targetSide: minimumPixelSide) }
             return
         }
 
