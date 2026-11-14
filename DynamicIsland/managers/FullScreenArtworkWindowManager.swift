@@ -623,16 +623,29 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         let overlayMode = artworkOverlayMode(shouldUseFallbackLayout: shouldUseFallbackLayout)
         let previousFallbackState = isShowingSpotifyCanvasFallback
 
-        guard let rawArtworkFileURL = persistedArtworkFileURL(for: artwork, fingerprint: artworkFingerprint) else { return }
         let expectCanvas = effectiveVideoURL != nil
-        let blurredFallbackURL = blurredWallpaperFileURL(for: artwork, fingerprint: artworkFingerprint, screen: screen) ?? rawArtworkFileURL
-        // Pre-render the wallpaper at the display's native pixel size with a
-        // high-quality filter instead of handing macOS a small square to stretch.
-        let filledArtworkURL = filledWallpaperFileURL(for: artwork, fingerprint: artworkFingerprint, screen: screen)
-            ?? rawArtworkFileURL
-        let wallpaperURL = (shouldUseStaticFallbackWallpaper || expectCanvas)
-            ? blurredFallbackURL
-            : filledArtworkURL
+        let needsFallbackWallpaper = shouldUseStaticFallbackWallpaper || expectCanvas
+
+        // Build only the image the wallpaper actually uses. Each of these is a full-size
+        // render plus a PNG encode, and doing all three took seconds on the main thread.
+        let blurredFallbackURL: URL?
+        let wallpaperURL: URL
+        if needsFallbackWallpaper {
+            guard let url = blurredWallpaperFileURL(for: artwork, fingerprint: artworkFingerprint, screen: screen)
+                ?? persistedArtworkFileURL(for: artwork, fingerprint: artworkFingerprint)
+            else { return }
+            blurredFallbackURL = url
+            wallpaperURL = url
+        } else {
+            // Rendered at the display's native pixel size with a high-quality filter instead
+            // of handing macOS a small square to stretch. Usually already prepared in the
+            // background when the track started.
+            guard let url = filledWallpaperFileURL(for: artwork, fingerprint: artworkFingerprint, screen: screen)
+                ?? persistedArtworkFileURL(for: artwork, fingerprint: artworkFingerprint)
+            else { return }
+            blurredFallbackURL = nil
+            wallpaperURL = url
+        }
         let wallpaperKey = wallpaperIdentityKey(
             fingerprint: artworkFingerprint,
             usesFallback: shouldUseStaticFallbackWallpaper || expectCanvas,
@@ -651,7 +664,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
 
         if requiresWallpaperRefresh {
             if expectCanvas {
-                pendingFallbackStaticURL = blurredFallbackURL
+                pendingFallbackStaticURL = blurredFallbackURL ?? wallpaperURL
                 pendingFallbackWallpaperKey = wallpaperKey
                 activeWallpaperKey = nil
                 activeLiveWallpaperFingerprint = nil
@@ -803,15 +816,42 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         let sourceArtworkURL = MusicManager.shared.sourceArtworkURL
         let pixelSize = wallpaperPixelSize(for: screen)
         let minimumPixelSide = Int(max(pixelSize.width, pixelSize.height).rounded())
-        Task.detached(priority: .utility) {
-            _ = await HighResArtworkProvider.shared.artwork(
+        Task.detached(priority: .utility) { [weak self] in
+            let data = await HighResArtworkProvider.shared.artwork(
                 title: title,
                 artist: artist,
                 album: album,
                 sourceArtworkURL: sourceArtworkURL,
                 minimumPixelSide: minimumPixelSide
             )
+            guard let data, let self else { return }
+            await self.prerenderFilledWallpaper(from: data, pixelSize: pixelSize)
         }
+    }
+
+    /// Renders the screen-sized wallpaper image for a fetched cover off the main thread, so
+    /// applying it later is just a file swap.
+    private func prerenderFilledWallpaper(from data: Data, pixelSize: CGSize) async {
+        let cacheKeySuffix = "\(Int(pixelSize.width.rounded()))x\(Int(pixelSize.height.rounded()))"
+        let rendered: (fingerprint: String, png: Data)? = await Task.detached(priority: .utility) { [self] in
+            autoreleasepool {
+                guard let image = NSImage(data: data),
+                      let fingerprint = self.imageFingerprint(for: image),
+                      let png = self.encodeFilledWallpaperPNG(from: image, targetPixelSize: pixelSize)
+                else { return nil }
+                return (fingerprint, png)
+            }
+        }.value
+        guard let rendered, !isShowing else { return }
+
+        let cacheKey = "\(normalizedFingerprintComponent(rendered.fingerprint))_\(cacheKeySuffix)"
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(Self.tempFilePrefix)_filled_\(cacheKey).png")
+        guard (try? rendered.png.write(to: fileURL, options: .atomic)) != nil else { return }
+        cachedFilledArtworkPNG = fileURL
+        cachedFilledArtworkKey = cacheKey
+        scheduleArtworkTempCleanup()
+        print("[FullScreenArtworkWindowManager] wallpaper image prepared in background")
     }
 
     /// Looks up the sharp cover for the current track and stores it when it beats the

@@ -760,7 +760,9 @@ struct LockScreenMusicPanel: View {
                 restingTrackHeight: 7,
                 draggingTrackHeight: 11,
                 tintOverride: progressSliderTint,
-                desaturatesWhenIdle: true
+                // Greyed out only while paused. Greying it whenever the pointer is away looked
+                // like a fault on the lock screen, where hover is unreliable.
+                desaturatesWhenIdle: !musicManager.isPlaying
             )
         }
         .onAppear {
