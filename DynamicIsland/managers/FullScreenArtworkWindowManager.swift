@@ -748,12 +748,16 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         let title = MusicManager.shared.songTitle
         let artist = MusicManager.shared.artistName
         let album = MusicManager.shared.album
-        let sourceArtworkURL = MusicManager.shared.sourceArtworkURL
+        let knownSourceURL = MusicManager.shared.sourceArtworkURL
+        let bundleIdentifier = MusicManager.shared.bundleIdentifier
         let targetPixelSize = wallpaperPixelSize(for: screen)
         let minimumPixelSide = Int(max(targetPixelSize.width, targetPixelSize.height).rounded())
 
         highResArtworkTask?.cancel()
         highResArtworkTask = Task { @MainActor [weak self] in
+            let sourceArtworkURL = await Self.resolveSourceArtworkURL(
+                known: knownSourceURL, bundleIdentifier: bundleIdentifier, title: title
+            )
             guard let imageData = await HighResArtworkProvider.shared.artwork(
                 title: title,
                 artist: artist,
@@ -797,6 +801,18 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         }
     }
 
+    /// The source app's own cover URL. With "Now Playing" selected there isn't one, so when the
+    /// YouTube Music desktop app is the active source, ask its API server directly.
+    private nonisolated static func resolveSourceArtworkURL(
+        known: URL?,
+        bundleIdentifier: String?,
+        title: String
+    ) async -> URL? {
+        if let known { return known }
+        guard bundleIdentifier == YouTubeMusicCoverLookup.bundleIdentifier else { return nil }
+        return await YouTubeMusicCoverLookup.shared.coverURL(forTitle: title)
+    }
+
     /// No sharper cover exists online, so enlarge the one we have with the on-device model.
     private func prepareUpscaledArtwork(trackKey: String, targetSide: Int) async {
         guard #available(macOS 26.0, *) else { return }
@@ -815,11 +831,15 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         let title = MusicManager.shared.songTitle
         let artist = MusicManager.shared.artistName
         let album = MusicManager.shared.album
-        let sourceArtworkURL = MusicManager.shared.sourceArtworkURL
+        let knownSourceURL = MusicManager.shared.sourceArtworkURL
+        let bundleIdentifier = MusicManager.shared.bundleIdentifier
         let trackKey = currentTrackKey
         let pixelSize = wallpaperPixelSize(for: screen)
         let minimumPixelSide = Int(max(pixelSize.width, pixelSize.height).rounded())
         Task.detached(priority: .utility) { [weak self] in
+            let sourceArtworkURL = await Self.resolveSourceArtworkURL(
+                known: knownSourceURL, bundleIdentifier: bundleIdentifier, title: title
+            )
             let data = await HighResArtworkProvider.shared.artwork(
                 title: title,
                 artist: artist,
@@ -864,13 +884,17 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         let title = MusicManager.shared.songTitle
         let artist = MusicManager.shared.artistName
         let album = MusicManager.shared.album
-        let sourceArtworkURL = MusicManager.shared.sourceArtworkURL
+        let knownSourceURL = MusicManager.shared.sourceArtworkURL
+        let bundleIdentifier = MusicManager.shared.bundleIdentifier
         let targetPixelSize = wallpaperPixelSize(for: screen)
         let minimumPixelSide = Int(max(targetPixelSize.width, targetPixelSize.height).rounded())
 
         let imageData: Data? = await withTaskGroup(of: Data?.self) { group in
             group.addTask {
-                await HighResArtworkProvider.shared.artwork(
+                let sourceArtworkURL = await Self.resolveSourceArtworkURL(
+                    known: knownSourceURL, bundleIdentifier: bundleIdentifier, title: title
+                )
+                return await HighResArtworkProvider.shared.artwork(
                     title: title,
                     artist: artist,
                     album: album,
