@@ -303,6 +303,8 @@ final class FullScreenArtworkWindowManager: ObservableObject {
     }()
     private var artworkFileURL: URL?
     private var tempCleanupTask: Task<Void, Never>?
+    /// Wallpaper image rendered ahead of time for a track, keyed by track and screen size.
+    private var prerenderedWallpaper: (trackKey: String, pixelKey: String, url: URL)?
     private static let tempFilePrefix = "atoll_artwork_wallpaper"
     private static let tempFileLifetime: TimeInterval = 300
     private var cachedArtworkPNG: URL?
@@ -814,6 +816,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         let artist = MusicManager.shared.artistName
         let album = MusicManager.shared.album
         let sourceArtworkURL = MusicManager.shared.sourceArtworkURL
+        let trackKey = currentTrackKey
         let pixelSize = wallpaperPixelSize(for: screen)
         let minimumPixelSide = Int(max(pixelSize.width, pixelSize.height).rounded())
         Task.detached(priority: .utility) { [weak self] in
@@ -825,31 +828,28 @@ final class FullScreenArtworkWindowManager: ObservableObject {
                 minimumPixelSide: minimumPixelSide
             )
             guard let data, let self else { return }
-            await self.prerenderFilledWallpaper(from: data, pixelSize: pixelSize)
+            await self.prerenderFilledWallpaper(from: data, trackKey: trackKey, pixelSize: pixelSize)
         }
     }
 
     /// Renders the screen-sized wallpaper image for a fetched cover off the main thread, so
     /// applying it later is just a file swap.
-    private func prerenderFilledWallpaper(from data: Data, pixelSize: CGSize) async {
-        let cacheKeySuffix = "\(Int(pixelSize.width.rounded()))x\(Int(pixelSize.height.rounded()))"
-        let rendered: (fingerprint: String, png: Data)? = await Task.detached(priority: .utility) { [self] in
-            autoreleasepool {
-                guard let image = NSImage(data: data),
-                      let fingerprint = self.imageFingerprint(for: image),
-                      let png = self.encodeFilledWallpaperPNG(from: image, targetPixelSize: pixelSize)
-                else { return nil }
-                return (fingerprint, png)
-            }
-        }.value
-        guard let rendered, !isShowing else { return }
+    private func prerenderFilledWallpaper(from data: Data, trackKey: String, pixelSize: CGSize) async {
+        let pixelKey = "\(Int(pixelSize.width.rounded()))x\(Int(pixelSize.height.rounded()))"
+        if let existing = prerenderedWallpaper, existing.trackKey == trackKey, existing.pixelKey == pixelKey,
+           FileManager.default.fileExists(atPath: existing.url.path) {
+            return
+        }
 
-        let cacheKey = "\(normalizedFingerprintComponent(rendered.fingerprint))_\(cacheKeySuffix)"
+        let png: Data? = await Task.detached(priority: .utility) { [self] in
+            autoreleasepool { self.encodeFilledWallpaperPNG(fromEncoded: data, targetPixelSize: pixelSize) }
+        }.value
+        guard let png, !isShowing else { return }
+
         let fileURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(Self.tempFilePrefix)_filled_\(cacheKey).png")
-        guard (try? rendered.png.write(to: fileURL, options: .atomic)) != nil else { return }
-        cachedFilledArtworkPNG = fileURL
-        cachedFilledArtworkKey = cacheKey
+            .appendingPathComponent("\(Self.tempFilePrefix)_filled_prerender_\(abs(trackKey.hashValue))_\(pixelKey).png")
+        guard (try? png.write(to: fileURL, options: .atomic)) != nil else { return }
+        prerenderedWallpaper = (trackKey, pixelKey, fileURL)
         scheduleArtworkTempCleanup()
         print("[FullScreenArtworkWindowManager] wallpaper image prepared in background")
     }
@@ -1046,7 +1046,16 @@ final class FullScreenArtworkWindowManager: ObservableObject {
 
     private func filledWallpaperFileURL(for artwork: NSImage, fingerprint: String, screen: NSScreen) -> URL? {
         let pixelSize = wallpaperPixelSize(for: screen)
-        let cacheKey = "\(normalizedFingerprintComponent(fingerprint))_\(Int(pixelSize.width.rounded()))x\(Int(pixelSize.height.rounded()))"
+        let pixelKey = "\(Int(pixelSize.width.rounded()))x\(Int(pixelSize.height.rounded()))"
+        let cacheKey = "\(normalizedFingerprintComponent(fingerprint))_\(pixelKey)"
+
+        // Prepared in the background when the track started: nothing left to render.
+        if let ready = prerenderedWallpaper,
+           ready.trackKey == currentTrackKey, ready.pixelKey == pixelKey,
+           highResArtwork?.image === artwork,
+           FileManager.default.fileExists(atPath: ready.url.path) {
+            return ready.url
+        }
 
         if let cached = cachedFilledArtworkPNG,
            cachedFilledArtworkKey == cacheKey,
@@ -1077,7 +1086,18 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         guard let tiffData = artwork.tiffRepresentation,
               let sourceImage = CIImage(data: tiffData)
         else { return nil }
+        return encodeFilledWallpaperPNG(from: sourceImage, targetPixelSize: targetPixelSize)
+    }
 
+    /// Same render, straight from the cover's original compressed bytes. Core Image decodes
+    /// those lazily, so the full 3000 px bitmap and an uncompressed TIFF copy of it are never
+    /// both held in memory.
+    private nonisolated func encodeFilledWallpaperPNG(fromEncoded data: Data, targetPixelSize: CGSize) -> Data? {
+        guard let sourceImage = CIImage(data: data) else { return nil }
+        return encodeFilledWallpaperPNG(from: sourceImage, targetPixelSize: targetPixelSize)
+    }
+
+    private nonisolated func encodeFilledWallpaperPNG(from sourceImage: CIImage, targetPixelSize: CGSize) -> Data? {
         let sourceExtent = sourceImage.extent
         guard sourceExtent.width > 0, sourceExtent.height > 0 else { return nil }
 
@@ -1110,7 +1130,12 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         let context = SharedCIContext.shared
         guard let cgImage = context.createCGImage(centeredImage, from: targetRect) else { return nil }
 
-        return NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:])
+        // Written straight from the CGImage; going through NSBitmapImageRep copies the pixels again.
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
     }
 
     private func wallpaperPixelSize(for screen: NSScreen) -> CGSize {
@@ -1193,6 +1218,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
                 // Covers kept for a quick apply are dropped after five minutes.
                 self.highResArtwork = nil
                 self.upscaledArtwork = nil
+                self.prerenderedWallpaper = nil
             }
         }
     }
@@ -1201,7 +1227,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         // Files behind the wallpaper that is currently applied must stay.
         var inUse = Set<String>()
         if isShowing {
-            for url in [artworkFileURL, cachedArtworkPNG, cachedBlurredArtworkPNG, cachedFilledArtworkPNG] {
+            for url in [artworkFileURL, cachedArtworkPNG, cachedBlurredArtworkPNG, cachedFilledArtworkPNG, prerenderedWallpaper?.url] {
                 if let name = url?.lastPathComponent { inUse.insert(name) }
             }
         }
