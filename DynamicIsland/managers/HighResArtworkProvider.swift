@@ -206,35 +206,81 @@ actor HighResArtworkProvider {
     // MARK: - iTunes catalog
 
     private func fetchFromCatalog(title: String, artist: String, album: String, side: Int) async -> Data? {
-        guard let searchURL = makeAppleMusicCatalogSearchURL(query: "\(title) \(artist)"),
-              let results = await search(searchURL)
-        else { return nil }
+        let baseTitle = Self.baseTitle(title)
+        let artists = Self.artistTokens(artist)
+        // Several credited artists make a poor search term; the song and the first one do better.
+        let query = [baseTitle, artists.first ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
 
-        let normalizedTitle = title.lowercased()
-        let normalizedAlbum = album.lowercased()
-        let normalizedArtist = artist.lowercased()
+        // The user's own storefront first (regional releases often exist only there), then the default.
+        let regions: [String?] = [Locale.current.region?.identifier, nil]
+        // Second query is the bare title: a track credited to several people is often filed
+        // under a different one first, and the album/artist checks below keep it safe.
+        var queries = [query]
+        if !baseTitle.isEmpty, baseTitle != query { queries.append(baseTitle) }
 
-        let match = results.first(where: {
-            $0.trackName?.lowercased() == normalizedTitle
-                && $0.collectionName?.lowercased() == normalizedAlbum
-        }) ?? results.first(where: {
-            !normalizedAlbum.isEmpty && $0.collectionName?.lowercased() == normalizedAlbum
-        }) ?? results.first(where: {
-            $0.trackName?.lowercased() == normalizedTitle
-                && ($0.artistName?.lowercased().contains(normalizedArtist) ?? false)
-        }) ?? results.first(where: {
-            // Streaming apps often tag editions differently ("Album (Deluxe)"),
-            // so accept a containing album name when the artist also agrees.
-            guard !normalizedAlbum.isEmpty, let collection = $0.collectionName?.lowercased() else { return false }
-            return (collection.contains(normalizedAlbum) || normalizedAlbum.contains(collection))
-                && ($0.artistName?.lowercased().contains(normalizedArtist) ?? false)
-        })
+        var totalResults = 0
+        for query in queries {
+            for region in regions {
+                guard var components = makeAppleMusicCatalogSearchURL(query: query)
+                    .flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }) else { continue }
+                if let region { components.queryItems?.append(URLQueryItem(name: "country", value: region)) }
+                guard let searchURL = components.url, let results = await search(searchURL) else { continue }
+                totalResults += results.count
 
-        guard let thumbnailURL = match?.artworkUrl100 else {
-            print("[HighResArtworkProvider] no catalog match for '\(title)' by '\(artist)' (\(results.count) results)")
-            return nil
+                if let thumbnailURL = Self.bestMatch(in: results, title: title, artist: artist, album: album)?.artworkUrl100 {
+                    return await downloadCatalogCover(thumbnailURL, side: side, title: title)
+                }
+            }
         }
-        return await downloadCatalogCover(thumbnailURL, side: side, title: title)
+        print("[HighResArtworkProvider] no catalog match for '\(title)' by '\(artist)' (\(totalResults) results)")
+        return nil
+    }
+
+    /// Picks the result that is the same song. Titles are compared without bracketed tags
+    /// ("(From \"Film\")", "(feat. X)") and punctuation, and a credited artist only has to
+    /// overlap with one of the result's, since services list collaborators differently.
+    private static func bestMatch(in results: [Track], title: String, artist: String, album: String) -> Track? {
+        let wantedTitle = squash(baseTitle(title))
+        let wantedAlbum = squash(baseTitle(album))
+        let wantedArtists = artistTokens(artist).map(squash).filter { !$0.isEmpty }
+
+        func artistsAgree(_ track: Track) -> Bool {
+            guard let name = track.artistName.map(squash), !wantedArtists.isEmpty else { return false }
+            return wantedArtists.contains { name.contains($0) || ($0.contains(name) && !name.isEmpty) }
+        }
+        func albumsAgree(_ track: Track) -> Bool {
+            guard !wantedAlbum.isEmpty, let collection = track.collectionName.map({ squash(baseTitle($0)) }),
+                  !collection.isEmpty else { return false }
+            return collection == wantedAlbum || collection.contains(wantedAlbum) || wantedAlbum.contains(collection)
+        }
+        func titleAgrees(_ track: Track) -> Bool {
+            track.trackName.map { squash(baseTitle($0)) == wantedTitle } ?? false
+        }
+
+        return results.first(where: { titleAgrees($0) && albumsAgree($0) && artistsAgree($0) })
+            ?? results.first(where: { titleAgrees($0) && artistsAgree($0) })
+            ?? results.first(where: { titleAgrees($0) && albumsAgree($0) })
+            ?? results.first(where: { albumsAgree($0) && artistsAgree($0) })
+    }
+
+    /// The title without bracketed tags and without a trailing " - Remix"-style suffix.
+    private static func baseTitle(_ text: String) -> String {
+        var result = text.replacingOccurrences(of: "\\([^)]*\\)|\\[[^\\]]*\\]", with: "", options: .regularExpression)
+        if let dash = result.range(of: " - ") { result = String(result[..<dash.lowerBound]) }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// "A, B and C" / "A & B feat. C" -> ["A", "B", "C"].
+    private static func artistTokens(_ artist: String) -> [String] {
+        artist
+            .replacingOccurrences(of: " and ", with: ",", options: .caseInsensitive)
+            .replacingOccurrences(of: " & ", with: ",")
+            .replacingOccurrences(of: " feat. ", with: ",", options: .caseInsensitive)
+            .replacingOccurrences(of: " ft. ", with: ",", options: .caseInsensitive)
+            .replacingOccurrences(of: " x ", with: ",", options: .caseInsensitive)
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     /// Browser tabs report video titles ("Song - Film - Full Video | Credits"). Search
