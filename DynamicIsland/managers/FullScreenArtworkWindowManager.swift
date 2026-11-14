@@ -380,6 +380,14 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         show(artwork: music.albumArt, videoURL: nil, allowLiveWallpaper: false, requireSharpCover: true)
     }
 
+    /// Whether anything can use the sharp cover: right-click fullscreen artwork or an automatic source.
+    private var isWallpaperFeatureEnabled: Bool {
+        Defaults[.lockScreenMusicFullscreenArtworkEnabled]
+            || Defaults[.lockScreenAutoWallpaperAppleMusic]
+            || Defaults[.lockScreenAutoWallpaperSpotify]
+            || Defaults[.lockScreenAutoWallpaperYouTubeMusic]
+    }
+
     private func isAutoWallpaperEnabled(forBundleIdentifier bundleIdentifier: String?) -> Bool {
         switch bundleIdentifier {
         case "com.apple.Music": return Defaults[.lockScreenAutoWallpaperAppleMusic]
@@ -403,7 +411,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         // the best image, instead of being set from the small one first.
         presentationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.prefetchHighResArtwork(on: screen, timeout: requireSharpCover ? .seconds(4) : .milliseconds(600), requireSharp: requireSharpCover)
+            await self.prefetchHighResArtwork(on: screen, timeout: requireSharpCover ? .seconds(15) : .milliseconds(600), requireSharp: requireSharpCover)
             guard !Task.isCancelled else { return }
             self.presentationTask = nil
             if requireSharpCover, self.highResArtwork?.trackKey != self.currentTrackKey {
@@ -481,12 +489,14 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             .debounce(for: .milliseconds(180), scheduler: DispatchQueue.main)
             .sink { [weak self] newArt in
                 guard let self else { return }
-                // Encoding and downloading artwork for every track is wasted work while the
-                // lock screen isn't up; the wallpaper path builds what it needs on demand.
+                // Fetch the sharp cover for every track (it is cached for five minutes), so
+                // the wallpaper can be applied the moment it is asked for.
+                if self.isWallpaperFeatureEnabled { self.warmUpHighResArtwork() }
+                // Encoding the PNG is wasted work while the lock screen isn't up; the
+                // wallpaper path builds what it needs on demand.
                 guard self.isShowing || LockScreenManager.shared.isLocked else { return }
                 guard let fingerprint = self.imageFingerprint(for: newArt) else { return }
                 guard fingerprint != self.cachedArtworkFingerprint else { return }
-                self.warmUpHighResArtwork()
                 let url = self.artworkCacheFileURL(for: fingerprint)
                 Task.detached(priority: .utility) {
                     guard let pngData = self.encodeToPNG(newArt) else { return }
@@ -853,6 +863,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
 
         print("[FullScreenArtworkWindowManager] using \(Int(image.atollPixelSize.width))px cover for first apply")
         highResArtwork = (trackKey, image)
+        scheduleArtworkTempCleanup()
     }
 
     private func observePanelFrameChanges() {
@@ -1138,6 +1149,11 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             guard !Task.isCancelled, let self else { return }
             self.tempCleanupTask = nil
             self.pruneArtworkTempFiles(olderThan: Self.tempFileLifetime)
+            if !self.isShowing {
+                // Covers kept for a quick apply are dropped after five minutes.
+                self.highResArtwork = nil
+                self.upscaledArtwork = nil
+            }
         }
     }
 

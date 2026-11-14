@@ -18,6 +18,7 @@
 
 import AppKit
 import Foundation
+import ImageIO
 
 /// Looks up a high-resolution copy of the current track's cover art for use as a
 /// full-screen wallpaper.
@@ -42,10 +43,18 @@ actor HighResArtworkProvider {
 
     private static let maximumPixelSide = 3000
 
-    // Only the most recent lookup is cached: the wallpaper refreshes for the
-    // current track repeatedly, while older tracks rarely come back.
-    private var lastKey: String?
-    private var lastImageData: Data?
+    /// Covers are fetched for every track so the wallpaper can use one instantly, then dropped
+    /// after five minutes. Each entry is the encoded image (typically 1-3 MB), never a decoded
+    /// bitmap. Failed lookups are remembered only briefly so a network hiccup can be retried.
+    private struct CacheEntry {
+        let data: Data?
+        let expires: Date
+    }
+    private static let successLifetime: TimeInterval = 300
+    private static let failureLifetime: TimeInterval = 30
+    private static let maximumEntries = 6
+    private var cache: [String: CacheEntry] = [:]
+    private var evictionTask: Task<Void, Never>?
 
     /// Returns encoded cover art at least `minimumPixelSide` pixels square (capped
     /// at 3000), or `nil` when no confident match exists. A wrong cover is worse than
@@ -61,8 +70,11 @@ actor HighResArtworkProvider {
         sourceArtworkURL: URL?,
         minimumPixelSide: Int
     ) async -> Data? {
-        let key = "\(title)|\(artist)|\(album)|\(sourceArtworkURL?.absoluteString ?? "")|\(minimumPixelSide)"
-        if key == lastKey { return lastImageData }
+        // Album is left out of the key: it is often filled in a moment after playback starts,
+        // and including it would make the warm-up and the later request miss each other.
+        let key = "\(title)|\(artist)|\(sourceArtworkURL?.absoluteString ?? "")|\(minimumPixelSide)"
+        evictExpiredEntries()
+        if let entry = cache[key] { return entry.data }
 
         // The warm-up and the wallpaper request often ask for the same track at the same
         // moment. Share one lookup instead of downloading the cover twice. The shared task
@@ -77,9 +89,39 @@ actor HighResArtworkProvider {
         inFlight[key] = task
         let result = await task.value
         inFlight[key] = nil
-        lastKey = key
-        lastImageData = result
+        store(result, forKey: key)
         return result
+    }
+
+    private func store(_ data: Data?, forKey key: String) {
+        let lifetime = data == nil ? Self.failureLifetime : Self.successLifetime
+        cache[key] = CacheEntry(data: data, expires: Date().addingTimeInterval(lifetime))
+        // Keep the newest few; a long session of short tracks must not accumulate covers.
+        if cache.count > Self.maximumEntries {
+            let oldest = cache.sorted { $0.value.expires < $1.value.expires }
+            for (staleKey, _) in oldest.prefix(cache.count - Self.maximumEntries) { cache[staleKey] = nil }
+        }
+        scheduleEviction()
+    }
+
+    private func evictExpiredEntries() {
+        let now = Date()
+        cache = cache.filter { $0.value.expires > now }
+    }
+
+    /// Frees the covers even when no further request arrives to trigger a cleanup.
+    private func scheduleEviction() {
+        guard evictionTask == nil else { return }
+        evictionTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.successLifetime))
+            await self?.finishEviction()
+        }
+    }
+
+    private func finishEviction() {
+        evictionTask = nil
+        evictExpiredEntries()
+        if !cache.isEmpty { scheduleEviction() }
     }
 
     private var inFlight: [String: Task<Data?, Never>] = [:]
@@ -145,11 +187,20 @@ actor HighResArtworkProvider {
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { return nil }
-            guard NSImage(data: data) != nil else { return nil }
+            guard Self.pixelWidth(of: data) != nil else { return nil }
             return data
         } catch {
             return nil
         }
+    }
+
+    /// Reads the width from the image header without decoding the pixels (a 3000 px cover
+    /// would otherwise briefly cost ~36 MB just to check that it is a picture).
+    private static func pixelWidth(of data: Data) -> Int? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        else { return nil }
+        return properties[kCGImagePropertyPixelWidth] as? Int
     }
 
     // MARK: - iTunes catalog
@@ -224,9 +275,9 @@ actor HighResArtworkProvider {
         let highResURLString = thumbnailURL.replacingOccurrences(of: "100x100", with: "\(side)x\(side)")
         guard let highResURL = URL(string: highResURLString),
               let data = await download(highResURL),
-              let image = NSImage(data: data)
+              let width = Self.pixelWidth(of: data)
         else { return nil }
-        print("[HighResArtworkProvider] fetched \(Int(image.atollPixelSize.width))px cover for '\(title)'")
+        print("[HighResArtworkProvider] fetched \(width)px cover for '\(title)'")
         return data
     }
 
