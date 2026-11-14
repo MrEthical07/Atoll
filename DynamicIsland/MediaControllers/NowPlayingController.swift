@@ -113,27 +113,112 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     // MARK: - Protocol Implementation
     func play() async {
+        if await routeToShownApp(.play) { return }
         MRMediaRemoteSendCommandFunction(0, nil)
     }
 
     func pause() async {
+        if await routeToShownApp(.pause) { return }
         MRMediaRemoteSendCommandFunction(1, nil)
     }
 
     func togglePlay() async {
+        if await routeToShownApp(.toggle) { return }
         MRMediaRemoteSendCommandFunction(2, nil)
     }
 
     func nextTrack() async {
+        if await routeToShownApp(.next) { return }
         MRMediaRemoteSendCommandFunction(4, nil)
     }
 
     func previousTrack() async {
+        if await routeToShownApp(.previous) { return }
         MRMediaRemoteSendCommandFunction(5, nil)
     }
 
     func seek(to time: Double) async {
+        if await routeSeekToShownApp(time) { return }
         MRMediaRemoteSetElapsedTimeFunction(time)
+    }
+
+    // MARK: - Commands for the app that is shown
+    //
+    // System commands go to whichever app macOS treats as current, which is the source of the
+    // latest event. When the notch is showing a different app (the one still playing), a
+    // system command would land on the wrong one, so those go to the app itself.
+
+    private enum RoutedCommand {
+        case play, pause, toggle, next, previous
+
+        var appleScriptVerb: String {
+            switch self {
+            case .play: return "play"
+            case .pause: return "pause"
+            case .toggle: return "playpause"
+            case .next: return "next track"
+            case .previous: return "previous track"
+            }
+        }
+
+        var youTubeMusicEndpoint: String {
+            switch self {
+            case .play: return "/play"
+            case .pause: return "/pause"
+            case .toggle: return "/toggle-play"
+            case .next: return "/next"
+            case .previous: return "/previous"
+            }
+        }
+    }
+
+    /// The shown app, if it differs from the one macOS would send a system command to.
+    private var shownAppNeedingDirectCommands: String? {
+        let shown = playbackState.bundleIdentifier
+        guard !shown.isEmpty, shown != lastEventBundle else { return nil }
+        return shown
+    }
+
+    private func routeToShownApp(_ command: RoutedCommand) async -> Bool {
+        guard let shown = shownAppNeedingDirectCommands else { return false }
+        switch shown {
+        case "com.apple.Music":
+            return await runAppleScript("tell application \"Music\" to \(command.appleScriptVerb)")
+        case "com.spotify.client":
+            return await runAppleScript("tell application \"Spotify\" to \(command.appleScriptVerb)")
+        case YouTubeMusicCoverLookup.bundleIdentifier:
+            return await YouTubeMusicCoverLookup.shared.send(command.youTubeMusicEndpoint)
+        default:
+            return false
+        }
+    }
+
+    private struct SeekBody: Codable, Sendable { let seconds: Double }
+
+    private func routeSeekToShownApp(_ time: Double) async -> Bool {
+        guard let shown = shownAppNeedingDirectCommands else { return false }
+        switch shown {
+        case "com.apple.Music":
+            return await runAppleScript("tell application \"Music\" to set player position to \(time)")
+        case "com.spotify.client":
+            return await runAppleScript("tell application \"Spotify\" to set player position to \(time)")
+        case YouTubeMusicCoverLookup.bundleIdentifier:
+            return await YouTubeMusicCoverLookup.shared.send("/seek-to", body: SeekBody(seconds: time))
+        default:
+            return false
+        }
+    }
+
+    private func runAppleScript(_ source: String) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", source]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus == 0) }
+            do { try process.run() } catch { continuation.resume(returning: false) }
+        }
     }
 
     func isActive() -> Bool {
@@ -320,12 +405,21 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         let payload = update.payload
         let diff = update.diff ?? false
 
-        var newPlaybackState = PlaybackState(bundleIdentifier: playbackState.bundleIdentifier)
+        // macOS reports one "current" player and switches it to whichever app produced the latest
+        // event, so a pause in one app can make it the only thing the feed describes while another
+        // keeps playing. Each event is therefore folded into the state of the app it came from,
+        // and what the notch shows is decided across all of them afterwards.
+        let incomingBundle = payload.parentApplicationBundleIdentifier
+            ?? payload.bundleIdentifier
+            ?? (diff ? lastEventBundle : "")
+        let base = clients[incomingBundle]?.state ?? PlaybackState(bundleIdentifier: incomingBundle)
+
+        var newPlaybackState = PlaybackState(bundleIdentifier: base.bundleIdentifier)
         
-        newPlaybackState.title = payload.title ?? (diff ? self.playbackState.title : "")
-        newPlaybackState.artist = payload.artist ?? (diff ? self.playbackState.artist : "")
-        newPlaybackState.album = payload.album ?? (diff ? self.playbackState.album : "")
-        newPlaybackState.duration = payload.resolvedDuration ?? (diff ? self.playbackState.duration : 0)
+        newPlaybackState.title = payload.title ?? (diff ? base.title : "")
+        newPlaybackState.artist = payload.artist ?? (diff ? base.artist : "")
+        newPlaybackState.album = payload.album ?? (diff ? base.album : "")
+        newPlaybackState.duration = payload.resolvedDuration ?? (diff ? base.duration : 0)
 
         // The reported position and the instant it was sampled are a matched pair:
         // elapsedTime is the position *at* timestamp. They have to be adopted or
@@ -341,8 +435,8 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             newPlaybackState.currentTime = 0
             newPlaybackState.lastUpdated = payload.resolvedTimestamp ?? Date()
         } else if diff {
-            newPlaybackState.currentTime = self.playbackState.currentTime
-            newPlaybackState.lastUpdated = self.playbackState.lastUpdated
+            newPlaybackState.currentTime = base.currentTime
+            newPlaybackState.lastUpdated = base.lastUpdated
         } else {
             newPlaybackState.currentTime = 0
             newPlaybackState.lastUpdated = payload.resolvedTimestamp ?? Date()
@@ -365,7 +459,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         // So the position is re-anchored on the transition itself: frozen where
         // it had got to when playback stops, and restarted from there when it
         // resumes.
-        let wasPlaying = self.playbackState.isPlaying
+        let wasPlaying = base.isPlaying
         let isPlayingNow = payload.playing ?? (diff ? wasPlaying : false)
 
         // Whether the sender sent a position is not the question -- whether it
@@ -397,10 +491,10 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             }()
 
             if wasPlaying {
-                let elapsedWhilePlaying = transitionInstant.timeIntervalSince(self.playbackState.lastUpdated)
+                let elapsedWhilePlaying = transitionInstant.timeIntervalSince(base.lastUpdated)
                 newPlaybackState.currentTime = max(
                     0,
-                    self.playbackState.currentTime + (elapsedWhilePlaying * self.playbackState.playbackRate)
+                    base.currentTime + (elapsedWhilePlaying * base.playbackRate)
                 )
             } else {
                 // Resuming. The position is wherever it was left, and the
@@ -409,7 +503,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
                 // be stale, which for some senders is a repeated zero that
                 // would restart the track. A seek while paused publishes a
                 // fresh sample, so it never reaches this branch.
-                newPlaybackState.currentTime = max(0, self.playbackState.currentTime)
+                newPlaybackState.currentTime = max(0, base.currentTime)
             }
 
             newPlaybackState.lastUpdated = transitionInstant
@@ -421,14 +515,14 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         } else if !diff {
             newPlaybackState.isShuffled = false
         } else {
-            newPlaybackState.isShuffled = self.playbackState.isShuffled
+            newPlaybackState.isShuffled = base.isShuffled
         }
         if let repeatModeValue = payload.repeatMode {
             newPlaybackState.repeatMode = RepeatMode(rawValue: repeatModeValue) ?? .off
         } else if !diff {
             newPlaybackState.repeatMode = .off
         } else {
-            newPlaybackState.repeatMode = self.playbackState.repeatMode
+            newPlaybackState.repeatMode = base.repeatMode
         }
 
         if let artworkDataString = payload.artworkData {
@@ -439,15 +533,70 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             newPlaybackState.artwork = nil
         }
 
-        newPlaybackState.playbackRate = payload.playbackRate ?? (diff ? self.playbackState.playbackRate : 1.0)
-        newPlaybackState.isPlaying = payload.playing ?? (diff ? self.playbackState.isPlaying : false)
+        newPlaybackState.playbackRate = payload.playbackRate ?? (diff ? base.playbackRate : 1.0)
+        newPlaybackState.isPlaying = payload.playing ?? (diff ? base.isPlaying : false)
         newPlaybackState.bundleIdentifier = (
             payload.parentApplicationBundleIdentifier ??
             payload.bundleIdentifier ??
-            (diff ? self.playbackState.bundleIdentifier : "")
+            (diff ? base.bundleIdentifier : "")
         )
         
-        self.playbackState = newPlaybackState
+        recordEvent(newPlaybackState, from: incomingBundle, wasPlaying: wasPlaying)
+    }
+
+    // MARK: - Choosing what to show
+
+    private struct ClientEntry {
+        var state: PlaybackState
+        var lastEvent: Date
+        /// When this app last went from paused to playing.
+        var startedPlaying: Date?
+    }
+
+    private var clients: [String: ClientEntry] = [:]
+    /// The app macOS currently treats as the now-playing one: the source of the latest event.
+    private var lastEventBundle: String = ""
+
+    private func recordEvent(_ state: PlaybackState, from bundle: String, wasPlaying: Bool) {
+        let now = Date()
+        lastEventBundle = bundle
+
+        if bundle.isEmpty && state.title.isEmpty && state.artist.isEmpty {
+            // macOS says nothing is playing any more. Other apps we have seen may still be.
+            pruneClientsOfQuitApps()
+            playbackState = selectedClientState() ?? state
+            return
+        }
+
+        var entry = clients[bundle] ?? ClientEntry(state: state, lastEvent: now, startedPlaying: nil)
+        entry.state = state
+        entry.lastEvent = now
+        if state.isPlaying && (!wasPlaying || entry.startedPlaying == nil) {
+            entry.startedPlaying = now
+        }
+        clients[bundle] = entry
+
+        pruneClientsOfQuitApps()
+        playbackState = selectedClientState() ?? state
+    }
+
+    /// Anything playing wins, and of several playing apps the one that started most recently.
+    /// With nothing playing, the app that last did something is shown.
+    private func selectedClientState() -> PlaybackState? {
+        let playing = clients.values.filter { $0.state.isPlaying }
+        if let newest = playing.max(by: { ($0.startedPlaying ?? .distantPast) < ($1.startedPlaying ?? .distantPast) }) {
+            return newest.state
+        }
+        return clients.values.max(by: { $0.lastEvent < $1.lastEvent })?.state
+    }
+
+    /// An app that quit can't pause itself, so it must not stay "playing" forever.
+    private func pruneClientsOfQuitApps() {
+        for bundle in clients.keys where !bundle.isEmpty {
+            if NSRunningApplication.runningApplications(withBundleIdentifier: bundle).isEmpty {
+                clients[bundle] = nil
+            }
+        }
     }
 }
 

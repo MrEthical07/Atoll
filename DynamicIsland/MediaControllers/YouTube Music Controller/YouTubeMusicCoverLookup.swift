@@ -48,12 +48,28 @@ actor YouTubeMusicCoverLookup {
         }
     }
 
-    private func playbackInfo() async throws -> PlaybackResponse {
-        let current: String
-        if let token { current = token } else {
-            current = try await client.authenticate()
-            token = current
+    /// Sends a transport command (play, pause, next, ...) to the app. Used when the notch shows
+    /// YouTube Music but macOS would send a system command to a different player.
+    func send(_ endpoint: String, body: (any Codable & Sendable)? = nil) async -> Bool {
+        do {
+            let current = try await currentToken()
+            _ = try await client.sendCommand(endpoint: endpoint, method: "POST", body: body, token: current)
+            return true
+        } catch {
+            token = nil
+            return false
         }
+    }
+
+    private func currentToken() async throws -> String {
+        if let token { return token }
+        let fresh = try await client.authenticate()
+        token = fresh
+        return fresh
+    }
+
+    private func playbackInfo() async throws -> PlaybackResponse {
+        let current = try await currentToken()
         do {
             return try await client.getPlaybackInfo(token: current)
         } catch YouTubeMusicError.authenticationRequired {
